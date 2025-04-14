@@ -34,8 +34,6 @@ DOUBLE_SIZE = 8
 DWORD_SIZE = 4
 QWORD_SIZE = 8
 
-R_ax = 0
-R_r15 = 15
 
 def size_of_operand(op):
     """
@@ -406,6 +404,8 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
             ida_allins.NN_vfmsub213sd: self.vfmsub213sd,
             ida_allins.NN_vfmsub231sd: self.vfmsub231sd,
             ida_allins.NN_vroundsd: self.vroundsd,
+
+            ida_allins.NN_vzeroupper: self.vzeroupper,
 
             #vblendvpd
             #vfmadd231pd
@@ -1127,6 +1127,20 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
         # failsafe
         assert "Unreachable..."
         return ida_hexrays.MERR_INSN 
+
+    def vzeroupper(self, cdg, insn):
+        """
+        VZEROUPPER: Clear the upper 128 bits of all YMM registers.
+        """
+        # Determine the number of YMM registers based on architecture
+        num_ymm_regs = 8 if not ida_ida.inf_is_64bit() else 16
+
+        # Iterate over all YMM registers
+        for reg_num in range(num_ymm_regs):
+            xmm_reg = ida_hexrays.reg2mreg(ida_idp.str2reg(f"xmm{reg_num}"))
+            self.emit_clear_ymm(xmm_reg)
+
+        return ida_hexrays.MERR_OK
 
     #-------------------------------------------------------------------------
     # Bitwise Instructions
