@@ -50,13 +50,11 @@ def size_of_operand(op):
             dt_ldbl, 32, 64 ]
     return n_bytes[op.dtype]
 
-def is_amd64_idb():
+def is_x86_idb():
     """
-    Return true if an x86_64 IDB is open.
+    Return true if an x86 or x86_64 IDB is open.
     """
-    if ida_idp.ph.id != ida_idp.PLFM_386:
-        return False
-    return ida_ida.cvar.inf.is_64bit()
+    return ida_idp.ph.id == ida_idp.PLFM_386
 
 def bytes2bits(n):
     """
@@ -1732,7 +1730,7 @@ class MicroAVX(ida_idaapi.plugin_t):
     """
 
     flags = ida_idaapi.PLUGIN_PROC | ida_idaapi.PLUGIN_HIDE
-    comment = "AVX support for the Hex-Rays x64 Decompiler"
+    comment = "AVX support for the Hex-Rays Decompiler"
     help = ""
     wanted_name = "MicroAVX"
     wanted_hotkey = ""
@@ -1748,16 +1746,22 @@ class MicroAVX(ida_idaapi.plugin_t):
         """
 
         # only bother to load the plugin for relevant sessions
-        if not is_amd64_idb():
+        if not is_x86_idb():
+            print("Unsupported architecture. Skipping the plugin...")
             return ida_idaapi.PLUGIN_SKIP
 
-        # ensure the x64 decompiler is loaded
-        if ida_loader.load_plugin("hexx64") is None:
-            print("failed to load Hexx64 Decompiler...")
-            return ida_idaapi.PLUGIN_SKIP
+        # ensure the decompiler is loaded
+        if ida_ida.inf_is_64bit():
+            if not ida_loader.load_plugin("hexx64"):
+                print("Failed to load HexRays64 plugin. Skipping the plugin...")
+                return ida_idaapi.PLUGIN_SKIP
+        else:
+            if not ida_loader.load_plugin("hexrays"):
+                print("Failed to load HexRays plugin. Skipping the plugin...")
+                return ida_idaapi.PLUGIN_SKIP
 
         if not ida_hexrays.init_hexrays_plugin():
-            print("failed to init Hexx64 Decompiler...")
+            print("failed to init HexRays Decompiler...")
             return ida_idaapi.PLUGIN_SKIP
 
         NO_MOP = ida_hexrays.mop_t()
@@ -1767,7 +1771,8 @@ class MicroAVX(ida_idaapi.plugin_t):
         self.avx_lifter = AVXLifter()
         self.avx_lifter.install()
         sys.modules["__main__"].lifter = self.avx_lifter
-
+        print("AVX support for the Hex-Rays Decompiler installed successfully")
+        
         # mark the plugin as loaded
         self.loaded = True
         return ida_idaapi.PLUGIN_KEEP
