@@ -559,19 +559,7 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
         self.cdg.mb.insert_into_block(instr, self.cdg.mb.tail)
 
     def emit_clear_ymm(self, xmm_mreg):
-        #nil = ida_hexrays.mop_t()
-        #nil.make_number(0, YMM_SIZE)
-        t = self.alloc_reg(YMM_SIZE)
-        t_mop = ida_hexrays.mop_t(t, YMM_SIZE)
-
-        xmm_mop = ida_hexrays.mop_t(xmm_mreg, XMM_SIZE)
-
-        ymm_mreg = get_ymm_mreg(xmm_mreg)
-        ymm_mop = ida_hexrays.mop_t(ymm_mreg, YMM_SIZE)
-        self.cdg.emit(ida_hexrays.m_xdu, xmm_mop, NO_MOP, t_mop)
-        self.cdg.emit(ida_hexrays.m_mov, t_mop, NO_MOP, ymm_mop)
-        self.free_reg(t, YMM_SIZE)
-
+        clear_upper(self.cdg, xmm_mreg)
 
     def emit_clear_flag(self, mreg):
         self.emit_clear_dst(ida_hexrays.mop_t(mreg, 1))
