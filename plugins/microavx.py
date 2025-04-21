@@ -362,6 +362,17 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
             ida_allins.NN_vxorps: self.v_bitwise_ps,
             ida_allins.NN_vxorpd: self.v_bitwise_ps,
 
+            # Math (Packed Integers)
+            ida_allins.NN_vpaddb: self.vpaddb,
+            ida_allins.NN_vpaddw: self.vpaddw,
+            ida_allins.NN_vpaddd: self.vpaddd,
+            ida_allins.NN_vpaddq: self.vpaddq,
+            ida_allins.NN_vpsubb: self.vpsubb,
+            ida_allins.NN_vpsubw: self.vpsubw,
+            ida_allins.NN_vpsubd: self.vpsubd,
+            ida_allins.NN_vpmulld: self.vpmulld,
+            ida_allins.NN_vpmullq: self.vpmullq,
+
             # Math (Scalar Single-Precision)
             ida_allins.NN_vaddss: self.v_math_ss,
             ida_allins.NN_vsubss: self.v_math_ss,
@@ -1429,6 +1440,84 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
 
     def vfmsub231sd(self, cdg, insn):
         return self._vfmsubxxxsd(cdg, insn)
+
+    def vpaddb(self, cdg, insn):
+        return self._vp_math_int(cdg, insn, 1, ida_hexrays.m_add)
+
+    def vpaddw(self, cdg, insn):
+        return self._vp_math_int(cdg, insn, 2, ida_hexrays.m_add)
+
+    def vpaddd(self, cdg, insn):
+        return self._vp_math_int(cdg, insn, DWORD_SIZE, ida_hexrays.m_add)
+
+    def vpaddq(self, cdg, insn):
+        return self._vp_math_int(cdg, insn, QWORD_SIZE, ida_hexrays.m_add)
+
+    def vpsubb(self, cdg, insn):
+        return self._vp_math_int(cdg, insn, 1, ida_hexrays.m_sub)
+
+    def vpsubw(self, cdg, insn):
+        return self._vp_math_int(cdg, insn, 2, ida_hexrays.m_sub)
+
+    def vpsubd(self, cdg, insn):
+        return self._vp_math_int(cdg, insn, DWORD_SIZE, ida_hexrays.m_sub)
+
+    def vpsubq(self, cdg, insn):
+        return self._vp_math_int(cdg, insn, QWORD_SIZE, ida_hexrays.m_sub)
+
+    def vpmulld(self, cdg, insn):
+        return self._vp_math_int(cdg, insn, DWORD_SIZE, ida_hexrays.m_mul)
+
+    def vpmullq(self, cdg, insn):
+        return self._vp_math_int(cdg, insn, QWORD_SIZE, ida_hexrays.m_mul)
+
+    def _vp_math_int(self, cdg, insn, data_size, operation):
+        """
+        Generic handler for VP arithmetic instructions (add, sub, mul, div).
+        """
+        assert is_avx_reg(insn.Op1) and is_avx_reg(insn.Op2)
+        op_size = XMM_SIZE if is_xmm_reg(insn.Op1) else YMM_SIZE
+
+        # op3 -- m128/m256
+        if is_mem_op(insn.Op3):
+            r_reg = cdg.load_operand(2)
+
+        # op3 -- xmm3/ymm3
+        else:
+            assert is_avx_reg(insn.Op3)
+            r_reg = ida_hexrays.reg2mreg(insn.Op3.reg)
+
+        # op2 -- xmm2/ymm2
+        l_reg = ida_hexrays.reg2mreg(insn.Op2.reg)
+
+        # op1 -- xmm1/ymm1
+        d_reg = ida_hexrays.reg2mreg(insn.Op1.reg)
+
+        # Map operation to intrinsic name
+        operation_map = {
+            ida_hexrays.m_add: "_mm%u_add_epi%u",
+            ida_hexrays.m_sub: "_mm%u_sub_epi%u",
+            ida_hexrays.m_mul: "_mm%u_mul_epi%u",
+        }
+        if operation not in operation_map:
+            return ida_hexrays.MERR_INSN
+
+        # Generate intrinsic name
+        bit_size = bytes2bits(op_size)
+        intrinsic_name = operation_map[operation] % (bit_size, bytes2bits(data_size))
+
+        # Create and configure the AVXIntrinsic
+        avx_intrinsic = AVXIntrinsic(cdg, intrinsic_name)
+        avx_intrinsic.add_argument_reg(l_reg, "__m%u" % bit_size)
+        avx_intrinsic.add_argument_reg(r_reg, "__m%u" % bit_size)
+        avx_intrinsic.set_return_reg(d_reg, "__m%u" % bit_size)
+        avx_intrinsic.emit()
+
+        # Clear upper 128 bits of ymm1 if needed
+        if op_size == XMM_SIZE:
+            clear_upper(cdg, d_reg)
+
+        return ida_hexrays.MERR_OK
 
     def v_math_ps(self, cdg, insn):
         """
