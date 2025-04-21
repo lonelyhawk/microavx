@@ -1504,7 +1504,8 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
 
         # Generate intrinsic name
         bit_size = bytes2bits(op_size)
-        intrinsic_name = operation_map[operation] % (bit_size, bytes2bits(data_size))
+        bit_str = "" if op_size == XMM_SIZE else str(bit_size)
+        intrinsic_name = operation_map[operation] % (bit_str, bytes2bits(data_size))
 
         # Create and configure the AVXIntrinsic
         avx_intrinsic = AVXIntrinsic(cdg, intrinsic_name)
