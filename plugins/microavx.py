@@ -1508,9 +1508,9 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
 
         # Create and configure the AVXIntrinsic
         avx_intrinsic = AVXIntrinsic(cdg, intrinsic_name)
-        avx_intrinsic.add_argument_reg(l_reg, "__m%u" % bit_size)
-        avx_intrinsic.add_argument_reg(r_reg, "__m%u" % bit_size)
-        avx_intrinsic.set_return_reg(d_reg, "__m%u" % bit_size)
+        avx_intrinsic.add_argument_reg(l_reg, "__m%ui" % bit_size)
+        avx_intrinsic.add_argument_reg(r_reg, "__m%ui" % bit_size)
+        avx_intrinsic.set_return_reg(d_reg, "__m%ui" % bit_size)
         avx_intrinsic.emit()
 
         # Clear upper 128 bits of ymm1 if needed
