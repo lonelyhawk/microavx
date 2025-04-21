@@ -1,3 +1,4 @@
+from ctypes.wintypes import BYTE
 import sys
 
 import idc
@@ -29,6 +30,8 @@ YMM_SIZE = 32
 ZMM_SIZE = 64
 
 # type sizes (bytes)
+BYTE_SIZE = 1
+WORD_SIZE = 2
 FLOAT_SIZE = 4
 DOUBLE_SIZE = 8
 DWORD_SIZE = 4
