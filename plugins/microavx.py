@@ -1,3 +1,4 @@
+from ctypes.wintypes import BYTE
 import sys
 
 import idc
@@ -29,13 +30,13 @@ YMM_SIZE = 32
 ZMM_SIZE = 64
 
 # type sizes (bytes)
+BYTE_SIZE = 1
+WORD_SIZE = 2
 FLOAT_SIZE = 4
 DOUBLE_SIZE = 8
 DWORD_SIZE = 4
 QWORD_SIZE = 8
 
-R_ax = 0
-R_r15 = 15
 
 def size_of_operand(op):
     """
@@ -357,12 +358,30 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
             ida_allins.NN_vmovupd: self.v_mov_ps_dq,
             ida_allins.NN_vmovapd: self.v_mov_ps_dq,
 
+            ida_allins.NN_vpinsrd: self.vpinsrd,
+            ida_allins.NN_vpinsrq: self.vpinsrq,
+            ida_allins.NN_vpinsrw: self.vpinsrw,
+            ida_allins.NN_vpinsrb: self.vpinsrb,
+
             # Bitwise (Packed Single-Precision)
             ida_allins.NN_vorps: self.v_bitwise_ps,
             ida_allins.NN_vandps: self.v_bitwise_ps,
             ida_allins.NN_vandpd: self.v_bitwise_ps,
+            ida_allins.NN_vandnpd: self.vandnpd,
+            ida_allins.NN_vandnps: self.vandnps,
             ida_allins.NN_vxorps: self.v_bitwise_ps,
             ida_allins.NN_vxorpd: self.v_bitwise_ps,
+
+            # Math (Packed Integers)
+            ida_allins.NN_vpaddb: self.vpaddb,
+            ida_allins.NN_vpaddw: self.vpaddw,
+            ida_allins.NN_vpaddd: self.vpaddd,
+            ida_allins.NN_vpaddq: self.vpaddq,
+            ida_allins.NN_vpsubb: self.vpsubb,
+            ida_allins.NN_vpsubw: self.vpsubw,
+            ida_allins.NN_vpsubd: self.vpsubd,
+            ida_allins.NN_vpmulld: self.vpmulld,
+            ida_allins.NN_vpmullq: self.vpmullq,
 
             # Math (Scalar Single-Precision)
             ida_allins.NN_vaddss: self.v_math_ss,
@@ -381,10 +400,12 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
             ida_allins.NN_vsubps: self.v_math_ps,
             ida_allins.NN_vmulps: self.v_math_ps,
             ida_allins.NN_vdivps: self.v_math_ps,
+            ida_allins.NN_vaddsubps: self.vaddsubps,
 
             ida_allins.NN_vaddpd: self.v_math_ps,
             ida_allins.NN_vsubpd: self.v_math_ps,
             ida_allins.NN_vmulpd: self.v_math_ps,
+            ida_allins.NN_vaddsubpd: self.vaddsubpd,
 
             # Square Root
             ida_allins.NN_vsqrtss: self.vsqrtss,
@@ -406,6 +427,26 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
             ida_allins.NN_vfmsub213sd: self.vfmsub213sd,
             ida_allins.NN_vfmsub231sd: self.vfmsub231sd,
             ida_allins.NN_vroundsd: self.vroundsd,
+
+            ida_allins.NN_vzeroupper: self.vzeroupper,
+
+            # Bitwise shifts
+
+            ida_allins.NN_vpsrlw: self.vpsrlw,
+            ida_allins.NN_vpsrld: self.vpsrld,
+            ida_allins.NN_vpsrlq: self.vpsrlq,
+            ida_allins.NN_vpsrldq: self.vpsrldq,
+
+            ida_allins.NN_vpsllw: self.vpsllw,
+            ida_allins.NN_vpslld: self.vpslld,
+            ida_allins.NN_vpsllq: self.vpsllq,
+            ida_allins.NN_vpslldq: self.vpslldq,
+
+            # Blend instructions
+            ida_allins.NN_vblendps: self.vblendps,
+            ida_allins.NN_vblendpd: self.vblendpd,
+            ida_allins.NN_vblendvps: self.vblendvps,
+            ida_allins.NN_vblendvpd: self.vblendvpd,
 
             #vblendvpd
             #vfmadd231pd
@@ -441,7 +482,7 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
         """
         try:
             cdg.store_operand = lambda x, y: store_operand_hack(cdg, x, y)
-            self.remove_store_operand_hack_dupinstrs(cdg, cdg.insn)
+            # self.remove_store_operand_hack_dupinstrs(cdg, cdg.insn)
             self.cdg = cdg
             result = self._avx_handlers[cdg.insn.itype](cdg, cdg.insn)
             self.cdg = None
@@ -559,19 +600,7 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
         self.cdg.mb.insert_into_block(instr, self.cdg.mb.tail)
 
     def emit_clear_ymm(self, xmm_mreg):
-        #nil = ida_hexrays.mop_t()
-        #nil.make_number(0, YMM_SIZE)
-        t = self.alloc_reg(YMM_SIZE)
-        t_mop = ida_hexrays.mop_t(t, YMM_SIZE)
-
-        xmm_mop = ida_hexrays.mop_t(xmm_mreg, XMM_SIZE)
-
-        ymm_mreg = get_ymm_mreg(xmm_mreg)
-        ymm_mop = ida_hexrays.mop_t(ymm_mreg, YMM_SIZE)
-        self.cdg.emit(ida_hexrays.m_xdu, xmm_mop, NO_MOP, t_mop)
-        self.cdg.emit(ida_hexrays.m_mov, t_mop, NO_MOP, ymm_mop)
-        self.free_reg(t, YMM_SIZE)
-
+        clear_upper(self.cdg, xmm_mreg)
 
     def emit_clear_flag(self, mreg):
         self.emit_clear_dst(ida_hexrays.mop_t(mreg, 1))
@@ -1128,6 +1157,157 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
         assert "Unreachable..."
         return ida_hexrays.MERR_INSN 
 
+    def vpinsrd(self, cdg, insn):
+        """
+        VPINSRD xmm1, xmm2, r32/m32, imm8
+        """
+        return self._vpinsr(cdg, insn, DWORD_SIZE)
+
+    def vpinsrq(self, cdg, insn):
+        """
+        VPINSRQ xmm1, xmm2, r64/m64, imm8
+        """
+        return self._vpinsr(cdg, insn, QWORD_SIZE)
+
+    def vpinsrw(self, cdg, insn):
+        """
+        VPINSRW xmm1, xmm2, r16/m16, imm8
+        """
+        return self._vpinsr(cdg, insn, 2)  # 16-bit size
+
+    def vpinsrb(self, cdg, insn):
+        """
+        VPINSRB xmm1, xmm2, r8/m8, imm8
+        """
+        return self._vpinsr(cdg, insn, 1)  # 8-bit size
+
+    def _vpinsr(self, cdg, insn, data_size):
+        """
+        Generic handler for VPINSR instructions.
+        Inserts a scalar value into a specific position of an XMM/YMM register.
+        """
+        # Ensure the destination is an AVX register
+        assert is_avx_reg(insn.Op1)
+
+        # op1 -- xmm1/ymm1
+        dest_reg = ida_hexrays.reg2mreg(insn.Op1.reg)
+
+        # op2 -- m128/m256
+        if is_mem_op(insn.Op2):
+            r_reg = cdg.load_operand(1)
+        # op2 -- xmm2/ymm2
+        else:
+            assert is_avx_reg(insn.Op2)
+            r_reg = ida_hexrays.reg2mreg(insn.Op2.reg)
+
+        # op3 -- rXX/mXX (source value)
+        if is_mem_op(insn.Op3):
+            src_reg = cdg.load_operand(2)
+        elif is_reg_op(insn.Op3):
+            src_reg = ida_hexrays.reg2mreg(insn.Op3.reg)
+        else:
+            return cdg.decode_error("op3 - expected register or memory")
+
+        # op4 -- imm8 (index)
+        if insn.Op4.type != ida_ua.o_imm:
+            return cdg.decode_error("op4 - expected imm8")
+        index = insn.Op4.value
+        
+        basic_types = {
+            BYTE_SIZE: ida_typeinf.BT_INT8,
+            WORD_SIZE: ida_typeinf.BT_INT16,
+            DWORD_SIZE: ida_typeinf.BT_INT32,
+            QWORD_SIZE: ida_typeinf.BT_INT64
+        }
+
+        op_size = XMM_SIZE if is_xmm_reg(insn.Op1) else YMM_SIZE
+
+        bit_size = bytes2bits(op_size)
+        bit_str = str(bit_size) if op_size == YMM_SIZE else ""
+
+        elem_size = bytes2bits(data_size)
+        elem_str = str(elem_size);
+        intrinsic_name = f"_mm{bit_str}_insert_epi{elem_size}"
+
+        avx_intrinsic = AVXIntrinsic(cdg, intrinsic_name)
+        avx_intrinsic.add_argument_reg(r_reg, "__m%ui" % bit_size)
+        avx_intrinsic.add_argument_reg_basic(src_reg, basic_types[data_size])
+        avx_intrinsic.add_argument_imm(index, ida_typeinf.BT_INT8)
+
+        avx_intrinsic.set_return_reg(dest_reg, "__m%ui" % bit_size)
+        avx_intrinsic.emit()
+
+        # clear upper 128 bits of ymm1
+        if op_size == XMM_SIZE:
+            clear_upper(cdg, dest_reg)
+
+        return ida_hexrays.MERR_OK
+
+    def vzeroupper(self, cdg, insn):
+        """
+        VZEROUPPER: Clear the upper 128 bits of all YMM registers.
+        """
+        # Determine the number of YMM registers based on architecture
+        num_ymm_regs = 8 if not ida_ida.inf_is_64bit() else 16
+
+        # Iterate over all YMM registers
+        for reg_num in range(num_ymm_regs):
+            xmm_reg = ida_hexrays.reg2mreg(ida_idp.str2reg(f"xmm{reg_num}"))
+            self.emit_clear_ymm(xmm_reg)
+
+        return ida_hexrays.MERR_OK
+
+    def vblendvpd(self, cdg, insn):
+        """
+        VBLENDVPD xmm1, xmm2, xmm3/m128, xmm4
+        VBLENDVPD ymm1, ymm2, ymm3/m256, ymm4
+        """
+        return self._vblendv(cdg, insn, DOUBLE_SIZE)
+
+    def vblendvps(self, cdg, insn):
+        """
+        VBLENDVPS xmm1, xmm2, xmm3/m128, xmm4
+        VBLENDVPS ymm1, ymm2, ymm3/m256, ymm4
+        """
+        return self._vblendv(cdg, insn, FLOAT_SIZE)
+
+    def _vblendv(self, cdg, insn, data_size):
+        op_size = XMM_SIZE if is_xmm_reg(insn.Op1) else YMM_SIZE
+
+        # op4 -- xmm4/ymm4 (mask register)
+        assert is_xmm_reg(insn.Op4) or is_ymm_reg(insn.Op4)
+        mask_reg = ida_hexrays.reg2mreg(insn.Op4.reg)
+
+        # op3 -- m128/m256
+        if is_mem_op(insn.Op3):
+            r_reg = cdg.load_operand(2)
+        else:
+            assert is_avx_reg(insn.Op3)
+            r_reg = ida_hexrays.reg2mreg(insn.Op3.reg)
+
+        # op2 -- xmm2/ymm2
+        l_reg = ida_hexrays.reg2mreg(insn.Op2.reg)
+
+        # op1 -- xmm1/ymm1
+        d_reg = ida_hexrays.reg2mreg(insn.Op1.reg)
+
+        # Intrinsic: _mm256_blendv_ps or _mm_blendv_ps
+        bit_size = bytes2bits(op_size)
+        intrinsic_name = f"_mm{bit_size}_blendv_ps" if data_size == FLOAT_SIZE else f"_mm{bit_size}_blendv_pd"
+
+        avx_intrinsic = AVXIntrinsic(cdg, intrinsic_name)
+        avx_intrinsic.add_argument_reg(l_reg, f"__m{bit_size}")
+        avx_intrinsic.add_argument_reg(r_reg, f"__m{bit_size}")
+        avx_intrinsic.add_argument_reg(mask_reg, f"__m{bit_size}")
+        avx_intrinsic.set_return_reg(d_reg, f"__m{bit_size}")
+        avx_intrinsic.emit()
+
+        # Clear upper 128 bits of ymm1
+        if op_size == XMM_SIZE:
+            clear_upper(cdg, d_reg)
+
+        return ida_hexrays.MERR_OK
+
     #-------------------------------------------------------------------------
     # Bitwise Instructions
     #-------------------------------------------------------------------------
@@ -1188,6 +1368,212 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
         if op_size == XMM_SIZE:
             clear_upper(cdg, d_reg)
 
+        return ida_hexrays.MERR_OK
+
+    def vandnpd(self, cdg, insn):
+        """
+        VANDNPD xmm1, xmm2, xmm3/m128
+        VANDNPD ymm1, ymm2, ymm3/m256
+        """
+        return self._v_bitwise_andnot(cdg, insn, DOUBLE_SIZE)
+
+    def vandnps(self, cdg, insn):
+        """
+        VANDNPS xmm1, xmm2, xmm3/m128
+        VANDNPS ymm1, ymm2, ymm3/m256
+        """
+        return self._v_bitwise_andnot(cdg, insn, FLOAT_SIZE)
+
+    def _v_bitwise_andnot(self, cdg, insn, data_size):
+        op_size = XMM_SIZE if is_xmm_reg(insn.Op1) else YMM_SIZE
+
+        # op3 -- m128/m256
+        if is_mem_op(insn.Op3):
+            r_reg = cdg.load_operand(2)
+        else:
+            assert is_avx_reg(insn.Op3)
+            r_reg = ida_hexrays.reg2mreg(insn.Op3.reg)
+
+        # op2 -- xmm2/ymm2
+        l_reg = ida_hexrays.reg2mreg(insn.Op2.reg)
+
+        # op1 -- xmm1/ymm1
+        d_reg = ida_hexrays.reg2mreg(insn.Op1.reg)
+
+        # Intrinsic: _mm256_andnot_ps or _mm_andnot_ps
+        bit_size = bytes2bits(op_size)
+        intrinsic_name = f"_mm{bit_size}_andnot_ps" if data_size == FLOAT_SIZE else f"_mm{bit_size}_andnot_pd"
+
+        avx_intrinsic = AVXIntrinsic(cdg, intrinsic_name)
+        avx_intrinsic.add_argument_reg(l_reg, f"__m{bit_size}")
+        avx_intrinsic.add_argument_reg(r_reg, f"__m{bit_size}")
+        avx_intrinsic.set_return_reg(d_reg, f"__m{bit_size}")
+        avx_intrinsic.emit()
+
+        # Clear upper 128 bits of ymm1
+        if op_size == XMM_SIZE:
+            clear_upper(cdg, d_reg)
+
+        return ida_hexrays.MERR_OK
+
+    #-------------------------------------------------------------------------
+    # Bitwise shifts
+    #-------------------------------------------------------------------------
+    def vpsllw(self, cdg, insn):
+        """
+        VPSLLW xmm1, xmm2, xmm3/m128
+        VPSLLW ymm1, ymm2, xmm3/m256
+        """
+        return self._vps_shift(cdg, insn, 2, ida_hexrays.m_shl)  # 16-bit size, left shift
+
+    def vpslld(self, cdg, insn):
+        """
+        VPSLLD xmm1, xmm2, xmm3/m128
+        VPSLLD ymm1, ymm2, xmm3/m256
+        """
+        return self._vps_shift(cdg, insn, DWORD_SIZE, ida_hexrays.m_shl)  # 32-bit size, left shift
+
+    def vpsllq(self, cdg, insn):
+        """
+        VPSLLQ xmm1, xmm2, xmm3/m128
+        VPSLLQ ymm1, ymm2, xmm3/m256
+        """
+        return self._vps_shift(cdg, insn, QWORD_SIZE, ida_hexrays.m_shl)  # 64-bit size, left shift
+
+    def vpsrlw(self, cdg, insn):
+        """
+        VPSRLW xmm1, xmm2, xmm3/m128
+        VPSRLW ymm1, ymm2, xmm3/m256
+        """
+        return self._vps_shift(cdg, insn, 2, ida_hexrays.m_shr)  # 16-bit size, right shift
+
+    def vpsrld(self, cdg, insn):
+        """
+        VPSRLD xmm1, xmm2, xmm3/m128
+        VPSRLD ymm1, ymm2, xmm3/m256
+        """
+        return self._vps_shift(cdg, insn, DWORD_SIZE, ida_hexrays.m_shr)  # 32-bit size, right shift
+
+    def vpsrlq(self, cdg, insn):
+        """
+        VPSRLQ xmm1, xmm2, xmm3/m128
+        VPSRLQ ymm1, ymm2, xmm3/m256
+        """
+        return self._vps_shift(cdg, insn, QWORD_SIZE, ida_hexrays.m_shr)  # 64-bit size, right shift
+
+    def vpslldq(self, cdg, insn):
+        """
+        VPSLLDQ xmm1, xmm2, imm8
+        VPSLLDQ ymm1, ymm2, imm8
+        """
+        return self._vps_shift(cdg, insn, 1, ida_hexrays.m_shl)  # Byte-level left shift
+
+    def vpsrldq(self, cdg, insn):
+        """
+        VPSRLDQ xmm1, xmm2, imm8
+        VPSRLDQ ymm1, ymm2, imm8
+        """
+        return self._vps_shift(cdg, insn, 1, ida_hexrays.m_shr)  # Byte-level right shift
+
+
+    def _vps_shift(self, cdg, insn, data_size, shift_op):
+        """
+        Generic handler for VPSLL* and VPSRL* instructions using Intel intrinsics.
+        """
+        assert is_avx_reg(insn.Op1) and is_avx_reg(insn.Op2)
+
+        # Determine register size and type
+        is_xmm = is_xmm_reg(insn.Op1)
+        op_size = XMM_SIZE if is_xmm else YMM_SIZE
+        avx_type = "__m256i" if not is_xmm else "__m128i"
+        prefix = "_mm256" if not is_xmm else "_mm"
+
+        # Get destination and source registers
+        dst_reg = ida_hexrays.reg2mreg(insn.Op1.reg)
+        src_reg = ida_hexrays.reg2mreg(insn.Op2.reg)
+
+        # Special case for byte shifts (VPSLLDQ and VPSRLDQ)
+        if data_size == BYTE_SIZE:
+            if shift_op == ida_hexrays.m_shl:
+                intrinsic_name = f"{prefix}_bslli_si128"
+            elif shift_op == ida_hexrays.m_shr:
+                intrinsic_name = f"{prefix}_bsrli_si128"
+        
+            # These instructions only take immediates
+            if insn.Op3.type != ida_ua.o_imm:
+                return cdg.decode_error("VPSLLDQ/VPSRLDQ requires immediate operand")
+        
+            # Create intrinsic and set up
+            intrinsic = AVXIntrinsic(cdg, intrinsic_name)
+            intrinsic.set_return_reg(dst_reg, avx_type)
+            intrinsic.add_argument_reg(src_reg, avx_type)
+        
+            # Immediate value (shift count in bytes)
+            imm_value = insn.Op3.value & 0xFF  # Only lower 8 bits are used
+            intrinsic.add_argument_imm(imm_value, ida_typeinf.BT_INT8)
+            intrinsic.emit()
+        
+            return ida_hexrays.MERR_OK
+    
+        # For regular element shifts
+        # Map data size to intrinsic type
+        element_suffix = "epi%u" % bytes2bits(data_size)
+    
+        # Handle different shift operand types
+        if insn.Op3.type == ida_ua.o_imm:
+            # Immediate value - use _mm[256]_[srl/sll]i_epiXX
+            if shift_op == ida_hexrays.m_shl:
+                intrinsic_name = f"{prefix}_slli_{element_suffix}"
+            else:
+                intrinsic_name = f"{prefix}_srli_{element_suffix}"
+        
+            intrinsic = AVXIntrinsic(cdg, intrinsic_name)
+            intrinsic.set_return_reg(dst_reg, avx_type)
+            intrinsic.add_argument_reg(src_reg, avx_type)
+        
+            # Add immediate shift count
+            imm_value = insn.Op3.value & 0xFF
+            intrinsic.add_argument_imm(imm_value, ida_typeinf.BT_INT8)
+            intrinsic.emit()
+    
+        elif is_mem_op(insn.Op3):
+            # Memory operand
+            if shift_op == ida_hexrays.m_shl:
+                intrinsic_name = f"{prefix}_sll_{element_suffix}"
+            else:
+                intrinsic_name = f"{prefix}_srl_{element_suffix}"
+        
+            # Load the memory operand
+            shift_reg = cdg.load_operand(2, op_size)
+        
+            intrinsic = AVXIntrinsic(cdg, intrinsic_name)
+            intrinsic.set_return_reg(dst_reg, avx_type)
+            intrinsic.add_argument_reg(src_reg, avx_type)
+            intrinsic.add_argument_reg(shift_reg, avx_type)
+            intrinsic.emit()
+        
+        elif is_avx_reg(insn.Op3):
+            # Register operand
+            if shift_op == ida_hexrays.m_shl:
+                intrinsic_name = f"{prefix}_sll_{element_suffix}"
+            else:
+                intrinsic_name = f"{prefix}_srl_{element_suffix}"
+        
+            shift_reg = ida_hexrays.reg2mreg(insn.Op3.reg)
+        
+            intrinsic = AVXIntrinsic(cdg, intrinsic_name)
+            intrinsic.set_return_reg(dst_reg, avx_type)
+            intrinsic.add_argument_reg(src_reg, avx_type)
+            intrinsic.add_argument_reg(shift_reg, avx_type)
+            intrinsic.emit()
+    
+        else:
+            return cdg.decode_error("Invalid operand type for shift count")
+    
+        # Clear upper 128 bits of YMM if needed
+        if not is_xmm:
+            clear_upper(cdg, dst_reg)
+    
         return ida_hexrays.MERR_OK
 
     #-------------------------------------------------------------------------
@@ -1303,6 +1689,52 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
 
         return ida_hexrays.MERR_OK
 
+    def vaddsubpd(self, cdg, insn):
+        """
+        VADDSUBPD xmm1, xmm2, xmm3/m128
+        VADDSUBPD ymm1, ymm2, ymm3/m256
+        """
+        return self._vaddsub(cdg, insn, DOUBLE_SIZE)
+
+    def vaddsubps(self, cdg, insn):
+        """
+        VADDSUBPS xmm1, xmm2, xmm3/m128
+        VADDSUBPS ymm1, ymm2, ymm3/m256
+        """
+        return self._vaddsub(cdg, insn, FLOAT_SIZE)
+
+    def _vaddsub(self, cdg, insn, data_size):
+        op_size = XMM_SIZE if is_xmm_reg(insn.Op1) else YMM_SIZE
+
+        # op3 -- m128/m256
+        if is_mem_op(insn.Op3):
+            r_reg = cdg.load_operand(2)
+        else:
+            assert is_avx_reg(insn.Op3)
+            r_reg = ida_hexrays.reg2mreg(insn.Op3.reg)
+
+        # op2 -- xmm2/ymm2
+        l_reg = ida_hexrays.reg2mreg(insn.Op2.reg)
+
+        # op1 -- xmm1/ymm1
+        d_reg = ida_hexrays.reg2mreg(insn.Op1.reg)
+
+        # Intrinsic: _mm256_addsub_ps or _mm_addsub_ps
+        bit_size = bytes2bits(op_size)
+        intrinsic_name = f"_mm{bit_size}_addsub_ps" if data_size == FLOAT_SIZE else f"_mm{bit_size}_addsub_pd"
+
+        avx_intrinsic = AVXIntrinsic(cdg, intrinsic_name)
+        avx_intrinsic.add_argument_reg(l_reg, f"__m{bit_size}")
+        avx_intrinsic.add_argument_reg(r_reg, f"__m{bit_size}")
+        avx_intrinsic.set_return_reg(d_reg, f"__m{bit_size}")
+        avx_intrinsic.emit()
+
+        # Clear upper 128 bits of ymm1
+        if op_size == XMM_SIZE:
+            clear_upper(cdg, d_reg)
+
+        return ida_hexrays.MERR_OK
+
     def vfmadd132sd(self, cdg, insn):
         return self._vfmaddxxxsd(cdg, insn)
 
@@ -1415,6 +1847,84 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
 
     def vfmsub231sd(self, cdg, insn):
         return self._vfmsubxxxsd(cdg, insn)
+
+    def vpaddb(self, cdg, insn):
+        return self._vp_math_int(cdg, insn, 1, ida_hexrays.m_add)
+
+    def vpaddw(self, cdg, insn):
+        return self._vp_math_int(cdg, insn, 2, ida_hexrays.m_add)
+
+    def vpaddd(self, cdg, insn):
+        return self._vp_math_int(cdg, insn, DWORD_SIZE, ida_hexrays.m_add)
+
+    def vpaddq(self, cdg, insn):
+        return self._vp_math_int(cdg, insn, QWORD_SIZE, ida_hexrays.m_add)
+
+    def vpsubb(self, cdg, insn):
+        return self._vp_math_int(cdg, insn, 1, ida_hexrays.m_sub)
+
+    def vpsubw(self, cdg, insn):
+        return self._vp_math_int(cdg, insn, 2, ida_hexrays.m_sub)
+
+    def vpsubd(self, cdg, insn):
+        return self._vp_math_int(cdg, insn, DWORD_SIZE, ida_hexrays.m_sub)
+
+    def vpsubq(self, cdg, insn):
+        return self._vp_math_int(cdg, insn, QWORD_SIZE, ida_hexrays.m_sub)
+
+    def vpmulld(self, cdg, insn):
+        return self._vp_math_int(cdg, insn, DWORD_SIZE, ida_hexrays.m_mul)
+
+    def vpmullq(self, cdg, insn):
+        return self._vp_math_int(cdg, insn, QWORD_SIZE, ida_hexrays.m_mul)
+
+    def _vp_math_int(self, cdg, insn, data_size, operation):
+        """
+        Generic handler for VP arithmetic instructions (add, sub, mul, div).
+        """
+        assert is_avx_reg(insn.Op1) and is_avx_reg(insn.Op2)
+        op_size = XMM_SIZE if is_xmm_reg(insn.Op1) else YMM_SIZE
+
+        # op3 -- m128/m256
+        if is_mem_op(insn.Op3):
+            r_reg = cdg.load_operand(2)
+
+        # op3 -- xmm3/ymm3
+        else:
+            assert is_avx_reg(insn.Op3)
+            r_reg = ida_hexrays.reg2mreg(insn.Op3.reg)
+
+        # op2 -- xmm2/ymm2
+        l_reg = ida_hexrays.reg2mreg(insn.Op2.reg)
+
+        # op1 -- xmm1/ymm1
+        d_reg = ida_hexrays.reg2mreg(insn.Op1.reg)
+
+        # Map operation to intrinsic name
+        operation_map = {
+            ida_hexrays.m_add: "_mm%u_add_epi%u",
+            ida_hexrays.m_sub: "_mm%u_sub_epi%u",
+            ida_hexrays.m_mul: "_mm%u_mul_epi%u",
+        }
+        if operation not in operation_map:
+            return ida_hexrays.MERR_INSN
+
+        # Generate intrinsic name
+        bit_size = bytes2bits(op_size)
+        intrinsic_name = operation_map[operation] % (bit_size, bytes2bits(data_size))
+
+        # Create and configure the AVXIntrinsic
+        avx_intrinsic = AVXIntrinsic(cdg, intrinsic_name)
+        avx_intrinsic.add_argument_reg(l_reg, "__m%u" % bit_size)
+        avx_intrinsic.add_argument_reg(r_reg, "__m%u" % bit_size)
+        avx_intrinsic.set_return_reg(d_reg, "__m%u" % bit_size)
+        avx_intrinsic.emit()
+
+        # Clear upper 128 bits of ymm1 if needed
+        if op_size == XMM_SIZE:
+            clear_upper(cdg, d_reg)
+
+        return ida_hexrays.MERR_OK
 
     def v_math_ps(self, cdg, insn):
         """
@@ -1711,6 +2221,57 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
 
         # clear upper 128 bits of ymm1
         clear_upper(cdg, d_reg)
+
+        return ida_hexrays.MERR_OK
+
+    def vblendpd(self, cdg, insn):
+        """
+        VBLENDPD xmm1, xmm2, xmm3/m128, imm8
+        VBLENDPD ymm1, ymm2, ymm3/m256, imm8
+        """
+        return self._v_blend(cdg, insn, DOUBLE_SIZE)
+
+    def vblendps(self, cdg, insn):
+        """
+        VBLENDPS xmm1, xmm2, xmm3/m128, imm8
+        VBLENDPS ymm1, ymm2, ymm3/m256, imm8
+        """
+        return self._v_blend(cdg, insn, FLOAT_SIZE)
+
+    def _v_blend(self, cdg, insn, data_size):
+        op_size = XMM_SIZE if is_xmm_reg(insn.Op1) else YMM_SIZE
+
+        # op4 -- imm8
+        assert insn.Op4.type == ida_ua.o_imm
+        mask_value = insn.Op4.value
+
+        # op3 -- m128/m256
+        if is_mem_op(insn.Op3):
+            r_reg = cdg.load_operand(2)
+        else:
+            assert is_avx_reg(insn.Op3)
+            r_reg = ida_hexrays.reg2mreg(insn.Op3.reg)
+
+        # op2 -- xmm2/ymm2
+        l_reg = ida_hexrays.reg2mreg(insn.Op2.reg)
+
+        # op1 -- xmm1/ymm1
+        d_reg = ida_hexrays.reg2mreg(insn.Op1.reg)
+
+        # Intrinsic: _mm256_blend_ps or _mm_blend_ps
+        bit_size = bytes2bits(op_size)
+        intrinsic_name = f"_mm{bit_size}_blend_ps" if data_size == FLOAT_SIZE else f"_mm{bit_size}_blend_pd"
+
+        avx_intrinsic = AVXIntrinsic(cdg, intrinsic_name)
+        avx_intrinsic.add_argument_reg(l_reg, f"__m{bit_size}")
+        avx_intrinsic.add_argument_reg(r_reg, f"__m{bit_size}")
+        avx_intrinsic.add_argument_imm(mask_value, ida_typeinf.BT_INT8)
+        avx_intrinsic.set_return_reg(d_reg, f"__m{bit_size}")
+        avx_intrinsic.emit()
+
+        # Clear upper 128 bits of ymm1
+        if op_size == XMM_SIZE:
+            clear_upper(cdg, d_reg)
 
         return ida_hexrays.MERR_OK
 
