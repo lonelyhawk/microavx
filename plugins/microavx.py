@@ -1,4 +1,3 @@
-from ctypes.wintypes import BYTE
 import sys
 
 import idc
@@ -36,6 +35,11 @@ FLOAT_SIZE = 4
 DOUBLE_SIZE = 8
 DWORD_SIZE = 4
 QWORD_SIZE = 8
+
+# intel.hpp register numbers (not exposed via IDAPython)
+R_ax = 0
+R_di = 7
+R_r15 = 15
 
 
 def size_of_operand(op):
@@ -146,10 +150,18 @@ def clear_upper(cdg, xmm_mreg, op_size=XMM_SIZE):
     """
     ymm_mreg = get_ymm_mreg(xmm_mreg)
 
-    xmm_mop = ida_hexrays.mop_t(xmm_mreg, op_size)
-    ymm_mop = ida_hexrays.mop_t(ymm_mreg, YMM_SIZE)
-
-    return cdg.emit(ida_hexrays.m_xdu, xmm_mop, NO_MOP, ymm_mop)
+    # the verifier rejects m_xdu with a 16-byte source / 32-byte destination
+    # (INTERR 50757) -- zero-extension only exists at scalar widths. instead,
+    # zero ymm[255:128] directly: the ymm mreg aliases the xmm one, so its
+    # upper half is the 16 bytes at mreg+16. immediates max out at 8 bytes,
+    # so it takes two 8-byte stores.
+    result = None
+    for offset in (XMM_SIZE, XMM_SIZE + QWORD_SIZE):
+        nil = ida_hexrays.mop_t()
+        nil.make_number(0, QWORD_SIZE)
+        dst = ida_hexrays.mop_t(ymm_mreg + offset, QWORD_SIZE)
+        result = cdg.emit(ida_hexrays.m_mov, nil, NO_MOP, dst)
+    return result
 
 def store_operand_hack(cdg, op_num, new_mop):
     """
@@ -380,6 +392,7 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
             ida_allins.NN_vpsubb: self.vpsubb,
             ida_allins.NN_vpsubw: self.vpsubw,
             ida_allins.NN_vpsubd: self.vpsubd,
+            ida_allins.NN_vpsubq: self.vpsubq,
             ida_allins.NN_vpmulld: self.vpmulld,
             ida_allins.NN_vpmullq: self.vpmullq,
 
@@ -484,12 +497,12 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
             cdg.store_operand = lambda x, y: store_operand_hack(cdg, x, y)
             # self.remove_store_operand_hack_dupinstrs(cdg, cdg.insn)
             self.cdg = cdg
-            result = self._avx_handlers[cdg.insn.itype](cdg, cdg.insn)
-            self.cdg = None
-            return result
-        except Exception as err:
+            return self._avx_handlers[cdg.insn.itype](cdg, cdg.insn)
+        except Exception:
             print(f'addr = {cdg.insn.ea:x}, x  = {traceback.format_exc()}')
             return ida_hexrays.MERR_INSN
+        finally:
+            self.cdg = None
 
     def install(self):
         """
@@ -650,11 +663,12 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
         (l_reg, r_reg) = regs
         L = ida_hexrays.mop_t(l_reg, data_size)
         R = ida_hexrays.mop_t(r_reg, data_size)
+        fp_type = ida_typeinf.BTF_FLOAT if data_size == FLOAT_SIZE else ida_typeinf.BTF_DOUBLE
         self.emit_function_call2(
             (ida_hexrays.mr_pf, ida_typeinf.BTF_BOOL),
             'std::isunordered',
-            (l_reg, ida_typeinf.BTF_DOUBLE),
-            (r_reg, ida_typeinf.BTF_DOUBLE),
+            (l_reg, fp_type),
+            (r_reg, fp_type),
             True)
         self.emit_fp_instr_l_r_d(ida_hexrays.m_setb, L, R, ida_hexrays.mop_t(ida_hexrays.mr_cf, 1))
         self.emit_fp_instr_l_r_d(ida_hexrays.m_setz, L, R, ida_hexrays.mop_t(ida_hexrays.mr_zf, 1))
@@ -724,6 +738,7 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
         t1_mop = ida_hexrays.mop_t(t1, dst_size)
         cdg.emit(ida_hexrays.m_f2i, s1_mop, NO_MOP, t1_mop)
         cdg.emit(ida_hexrays.m_mov, dst_size, t1, 0, d_reg, 0)
+        self.free_reg(t1, dst_size)
         return ida_hexrays.MERR_OK
 
     def vcvtdq2ps(self, cdg, insn):
@@ -976,7 +991,10 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
 
             # op form: xmm1, m32/m64
             if is_xmm_reg(insn.Op1) and is_mem_op(insn.Op2):
-                (d_reg, l_reg) = self.xmm1_xmm2_or_mem2()
+                regs = self.xmm1_xmm2_or_mem2()
+                if regs is None:
+                    return ida_hexrays.MERR_INSN
+                (d_reg, l_reg) = regs
                 self.emit_clear_ymm(d_reg)
                 self.emit_fp_instr_l_d(ida_hexrays.m_mov, ida_hexrays.mop_t(l_reg, data_size), ida_hexrays.mop_t(d_reg, data_size))
                 # clear_upper(cdg, d_reg, data_size)
@@ -1206,11 +1224,11 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
         elif is_reg_op(insn.Op3):
             src_reg = ida_hexrays.reg2mreg(insn.Op3.reg)
         else:
-            return cdg.decode_error("op3 - expected register or memory")
+            return self.decode_error("op3 - expected register or memory")
 
         # op4 -- imm8 (index)
         if insn.Op4.type != ida_ua.o_imm:
-            return cdg.decode_error("op4 - expected imm8")
+            return self.decode_error("op4 - expected imm8")
         index = insn.Op4.value
         
         basic_types = {
@@ -1293,7 +1311,8 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
 
         # Intrinsic: _mm256_blendv_ps or _mm_blendv_ps
         bit_size = bytes2bits(op_size)
-        intrinsic_name = f"_mm{bit_size}_blendv_ps" if data_size == FLOAT_SIZE else f"_mm{bit_size}_blendv_pd"
+        prefix = "_mm256" if op_size == YMM_SIZE else "_mm"
+        intrinsic_name = f"{prefix}_blendv_ps" if data_size == FLOAT_SIZE else f"{prefix}_blendv_pd"
 
         avx_intrinsic = AVXIntrinsic(cdg, intrinsic_name)
         avx_intrinsic.add_argument_reg(l_reg, f"__m{bit_size}")
@@ -1402,7 +1421,8 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
 
         # Intrinsic: _mm256_andnot_ps or _mm_andnot_ps
         bit_size = bytes2bits(op_size)
-        intrinsic_name = f"_mm{bit_size}_andnot_ps" if data_size == FLOAT_SIZE else f"_mm{bit_size}_andnot_pd"
+        prefix = "_mm256" if op_size == YMM_SIZE else "_mm"
+        intrinsic_name = f"{prefix}_andnot_ps" if data_size == FLOAT_SIZE else f"{prefix}_andnot_pd"
 
         avx_intrinsic = AVXIntrinsic(cdg, intrinsic_name)
         avx_intrinsic.add_argument_reg(l_reg, f"__m{bit_size}")
@@ -1501,7 +1521,7 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
         
             # These instructions only take immediates
             if insn.Op3.type != ida_ua.o_imm:
-                return cdg.decode_error("VPSLLDQ/VPSRLDQ requires immediate operand")
+                return self.decode_error("VPSLLDQ/VPSRLDQ requires immediate operand")
         
             # Create intrinsic and set up
             intrinsic = AVXIntrinsic(cdg, intrinsic_name)
@@ -1512,9 +1532,13 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
             imm_value = insn.Op3.value & 0xFF  # Only lower 8 bits are used
             intrinsic.add_argument_imm(imm_value, ida_typeinf.BT_INT8)
             intrinsic.emit()
-        
+
+            # clear upper 128 bits of ymm1
+            if is_xmm:
+                clear_upper(cdg, dst_reg)
+
             return ida_hexrays.MERR_OK
-    
+
         # For regular element shifts
         # Map data size to intrinsic type
         element_suffix = "epi%u" % bytes2bits(data_size)
@@ -1544,7 +1568,7 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
                 intrinsic_name = f"{prefix}_srl_{element_suffix}"
         
             # Load the memory operand
-            shift_reg = cdg.load_operand(2, op_size)
+            shift_reg = cdg.load_operand(2)
         
             intrinsic = AVXIntrinsic(cdg, intrinsic_name)
             intrinsic.set_return_reg(dst_reg, avx_type)
@@ -1568,10 +1592,10 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
             intrinsic.emit()
     
         else:
-            return cdg.decode_error("Invalid operand type for shift count")
-    
-        # Clear upper 128 bits of YMM if needed
-        if not is_xmm:
+            return self.decode_error("Invalid operand type for shift count")
+
+        # clear upper 128 bits of ymm1
+        if is_xmm:
             clear_upper(cdg, dst_reg)
     
         return ida_hexrays.MERR_OK
@@ -1637,12 +1661,21 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
         # get the hexrays microcode op to use for this instruction
         mcode_op = itype2mcode[insn.itype]
 
-        # emit the microcode for this insn
-        self.emit_clear_ymm(d_reg)
         l_mop = ida_hexrays.mop_t(l_reg, op_size)
         r_mop = ida_hexrays.mop_t(r_reg, op_size)
-        d_mop = ida_hexrays.mop_t(d_reg, op_size)
-        self.emit_fp_instr_l_r_d(mcode_op, l_mop, r_mop, d_mop)
+
+        # compute into a temp preloaded with xmm2, since DEST[127:n] must come
+        # from SRC1 -- not the old dest, which may also alias SRC2
+        t0_result = self.save_upper_bits(l_reg, XMM_SIZE)
+        t0_mop = ida_hexrays.mop_t(t0_result, op_size)
+        self.emit_fp_instr_l_r_d(mcode_op, l_mop, r_mop, t0_mop)
+
+        # transfer the fully computed temp register to the real dest reg
+        cdg.emit(ida_hexrays.m_mov, XMM_SIZE, t0_result, 0, d_reg, 0)
+        self.free_reg(t0_result, XMM_SIZE)
+
+        # clear upper 128 bits of ymm1
+        self.emit_clear_ymm(d_reg)
 
         return ida_hexrays.MERR_OK
 
@@ -1721,7 +1754,8 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
 
         # Intrinsic: _mm256_addsub_ps or _mm_addsub_ps
         bit_size = bytes2bits(op_size)
-        intrinsic_name = f"_mm{bit_size}_addsub_ps" if data_size == FLOAT_SIZE else f"_mm{bit_size}_addsub_pd"
+        prefix = "_mm256" if op_size == YMM_SIZE else "_mm"
+        intrinsic_name = f"{prefix}_addsub_ps" if data_size == FLOAT_SIZE else f"{prefix}_addsub_pd"
 
         avx_intrinsic = AVXIntrinsic(cdg, intrinsic_name)
         avx_intrinsic.add_argument_reg(l_reg, f"__m{bit_size}")
@@ -1900,24 +1934,26 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
         # op1 -- xmm1/ymm1
         d_reg = ida_hexrays.reg2mreg(insn.Op1.reg)
 
-        # Map operation to intrinsic name
+        # Map operation to intrinsic name (vpmull* is the "mullo" intrinsic,
+        # _mm_mul_epi32 is PMULDQ which has different semantics)
         operation_map = {
-            ida_hexrays.m_add: "_mm%u_add_epi%u",
-            ida_hexrays.m_sub: "_mm%u_sub_epi%u",
-            ida_hexrays.m_mul: "_mm%u_mul_epi%u",
+            ida_hexrays.m_add: "add",
+            ida_hexrays.m_sub: "sub",
+            ida_hexrays.m_mul: "mullo",
         }
         if operation not in operation_map:
             return ida_hexrays.MERR_INSN
 
         # Generate intrinsic name
         bit_size = bytes2bits(op_size)
-        intrinsic_name = operation_map[operation] % (bit_size, bytes2bits(data_size))
+        prefix = "_mm256" if op_size == YMM_SIZE else "_mm"
+        intrinsic_name = "%s_%s_epi%u" % (prefix, operation_map[operation], bytes2bits(data_size))
 
         # Create and configure the AVXIntrinsic
         avx_intrinsic = AVXIntrinsic(cdg, intrinsic_name)
-        avx_intrinsic.add_argument_reg(l_reg, "__m%u" % bit_size)
-        avx_intrinsic.add_argument_reg(r_reg, "__m%u" % bit_size)
-        avx_intrinsic.set_return_reg(d_reg, "__m%u" % bit_size)
+        avx_intrinsic.add_argument_reg(l_reg, "__m%ui" % bit_size)
+        avx_intrinsic.add_argument_reg(r_reg, "__m%ui" % bit_size)
+        avx_intrinsic.set_return_reg(d_reg, "__m%ui" % bit_size)
         avx_intrinsic.emit()
 
         # Clear upper 128 bits of ymm1 if needed
@@ -2260,7 +2296,8 @@ class AVXLifter(ida_hexrays.microcode_filter_t):
 
         # Intrinsic: _mm256_blend_ps or _mm_blend_ps
         bit_size = bytes2bits(op_size)
-        intrinsic_name = f"_mm{bit_size}_blend_ps" if data_size == FLOAT_SIZE else f"_mm{bit_size}_blend_pd"
+        prefix = "_mm256" if op_size == YMM_SIZE else "_mm"
+        intrinsic_name = f"{prefix}_blend_ps" if data_size == FLOAT_SIZE else f"{prefix}_blend_pd"
 
         avx_intrinsic = AVXIntrinsic(cdg, intrinsic_name)
         avx_intrinsic.add_argument_reg(l_reg, f"__m{bit_size}")
@@ -2325,10 +2362,7 @@ class MicroAVX(ida_idaapi.plugin_t):
             print("failed to init HexRays Decompiler...")
             return ida_idaapi.PLUGIN_SKIP
 
-        NO_MOP = ida_hexrays.mop_t()
-        NO_MOP.zero()
-
-        # initialize the AVX lifter 
+        # initialize the AVX lifter
         self.avx_lifter = AVXLifter()
         self.avx_lifter.install()
         sys.modules["__main__"].lifter = self.avx_lifter
